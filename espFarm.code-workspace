@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"name": "espFarm",
+			"path": "."
+		}
+	],
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+			"~/.platformio/penv/bin/pio": true,
+			"pio": true
+		}
+	}
+}
