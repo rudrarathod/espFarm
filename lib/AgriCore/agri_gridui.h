@@ -41,7 +41,8 @@ enum GridScreen : uint8_t {
     GRID_NODE_INFO  = 4,    // Node information page
     GRID_FARM_SEL   = 5,    // Farm re-select requested
     GRID_CONFIRM    = 6,    // Confirm device toggle
-    GRID_AOD_TIME   = 7     // AOD timeout adjustment screen
+    GRID_AOD_TIME   = 7,    // AOD timeout adjustment screen
+    GRID_SCHED_SETUP = 8    // Relay schedule setup screen
 };
 
 // ============================================================================
@@ -54,7 +55,11 @@ struct GridDevice {
     bool     ackPending;                        // Waiting for ACK
     bool     failFlash;                         // ACK timeout flash active
     uint32_t failFlashTime;                     // millis() when flash started
-    uint32_t lastSeenMs;                        // millis() when state last confirmed (0=never)
+    bool     schedEnabled;                      // Schedule is configured
+    bool     schedRunning;                      // Schedule is currently running
+    uint32_t schedLeftSec;                      // Time remaining in current phase
+    uint32_t schedDelaySec;                     // Configured delay seconds
+    uint32_t schedRunSec;                       // Configured run seconds
 };
 
 // ============================================================================
@@ -115,11 +120,37 @@ uint8_t grid_device_count();
 /// Update device state from ACK (clears ackPending)
 void grid_set_device_state(const char* deviceId, bool state);
 
+/// Update a device tile binding (index, deviceId) and state
+bool grid_set_device_binding(uint8_t idx, const char* deviceId, bool state);
+
 /// Clear ackPending flag on NACK / timeout
 void grid_clear_ack_pending(const char* deviceId);
 
 /// Mark device as FAIL-flashing (called on ACK timeout)
 void grid_set_fail_flash(const char* deviceId);
+
+/// Update schedule metadata for a device tile
+void grid_set_device_schedule(const char* deviceId,
+                              bool enabled,
+                              bool running,
+                              uint32_t leftSec,
+                              uint32_t delaySec,
+                              uint32_t runSec);
+
+/// Returns true once when user submits schedule setup from OLED
+bool grid_take_schedule_apply_request(char* outDeviceId,
+                                      uint8_t outLen,
+                                      uint32_t* outDelaySec,
+                                      uint32_t* outRunSec);
+
+/// Returns true once when user confirms schedule disable from OLED tile action
+bool grid_take_schedule_disable_request(char* outDeviceId, uint8_t outLen);
+
+/// Schedule setup editor accessors (for OLED rendering)
+uint8_t grid_schedule_field();
+uint8_t grid_schedule_device_index();
+uint32_t grid_schedule_delay_sec();
+uint32_t grid_schedule_run_sec();
 
 // ---- Settings submenu ----
 uint8_t     grid_settings_cursor();

@@ -287,7 +287,12 @@ void AgriDisplay::refresh() {
 
     s_oled.clearDisplay();
 
-    if (strcmp(_role, "RELAY") == 0) {
+    bool useGridUi = (strcmp(_role, "RELAY") != 0);
+#if AGRI_NODE_ROLE == AGRI_ROLE_RELAY
+    useGridUi = true;
+#endif
+
+    if (!useGridUi) {
         _drawHeader();
         _drawRelayScreen();
     } else {
@@ -304,6 +309,7 @@ void AgriDisplay::refresh() {
                 break;
             case GRID_CONFIRM:    _drawConfirm();         break;
             case GRID_AOD_TIME:   _drawAodTimeSetting();  break;
+            case GRID_SCHED_SETUP: _drawScheduleSetup();  break;
         }
     }
 
@@ -592,21 +598,6 @@ void AgriDisplay::_drawGrid() {
 }
 
 // ============================================================================
-// Compact elapsed-time formatter for tile display
-// Formats:  <1m → "Xs"  |  <60m → "Xm"  |  <24h → "Xh"  |  else → "Xd"
-// Returns pointer to static buffer.
-// ============================================================================
-static const char* _fmtElapsed(uint32_t elapsedMs) {
-    static char buf[6];
-    uint32_t sec = elapsedMs / 1000;
-    if (sec < 60)           snprintf(buf, sizeof(buf), "%us",  sec);
-    else if (sec < 3600)    snprintf(buf, sizeof(buf), "%um",  sec / 60);
-    else if (sec < 86400)   snprintf(buf, sizeof(buf), "%uh",  sec / 3600);
-    else                    snprintf(buf, sizeof(buf), "%ud",  sec / 86400);
-    return buf;
-}
-
-// ============================================================================
 // Grid UI — Single Tile Renderer  (accounts for 10px status bar offset)
 //
 // Tile size: 64×18  (128/2 cols, 54/3 rows)
@@ -652,22 +643,18 @@ void AgriDisplay::_drawGridTile(uint8_t idx, bool selected) {
         s_oled.setCursor(tx, y + 2);
         s_oled.print(dev->label);
 
-        // Line 2: state text + elapsed time (centred)
-        //   Normal: "ON 2m" / "OFF 15s"   Pending: "..."   Fail: "FAIL"
-        //   Stale:  "ON 45s!" / "OFF 2m!" (elapsed > AGRI_STALE_MS)
-        char stateBuf[11];     // max "OFF 999d!\0" = 10 chars
-        bool stale = false;
+        // Line 2: state text (centred)
+        //   Normal: "ON" / "OFF"   Pending: "..."   Fail: "FAIL"
+        //   Scheduled waiting/running: Wxx / Rxx (seconds)
+        char stateBuf[8];
         if (dev->failFlash) {
             strlcpy(stateBuf, "FAIL", sizeof(stateBuf));
         } else if (dev->ackPending) {
             strlcpy(stateBuf, "...", sizeof(stateBuf));
-        } else if (dev->lastSeenMs != 0) {
-            uint32_t elapsed = millis() - dev->lastSeenMs;
-            stale = (elapsed >= AGRI_STALE_MS);
-            snprintf(stateBuf, sizeof(stateBuf), "%s %s%s",
-                     dev->state ? "ON" : "OFF",
-                     _fmtElapsed(elapsed),
-                     stale ? "!" : "");
+        } else if (dev->schedEnabled) {
+            snprintf(stateBuf, sizeof(stateBuf), "%c%02lu",
+                     dev->schedRunning ? 'R' : 'W',
+                     (unsigned long)((dev->schedLeftSec > 99) ? 99 : dev->schedLeftSec));
         } else {
             strlcpy(stateBuf, dev->state ? "ON" : "OFF", sizeof(stateBuf));
         }
@@ -677,20 +664,22 @@ void AgriDisplay::_drawGridTile(uint8_t idx, bool selected) {
         s_oled.print(stateBuf);
 
         // Status dot  (top-right corner of tile)
-        // Blinks at 2 Hz when timestamp is stale (> AGRI_STALE_MS)
         if (!dev->ackPending && !dev->failFlash) {
-            bool dotVisible = !stale || ((millis() / 500) % 2 == 0);
-            if (dotVisible) {
-                uint8_t dotX = x + TILE_W - 7;
-                uint8_t dotY = y + 3;
-                uint16_t fg = selected ? SSD1306_BLACK : SSD1306_WHITE;
-                if (dev->state) {
-                    // ON → filled circle (solid dot)
-                    s_oled.fillCircle(dotX, dotY, 2, fg);
-                } else {
-                    // OFF → hollow circle
-                    s_oled.drawCircle(dotX, dotY, 2, fg);
+            uint8_t dotX = x + TILE_W - 7;
+            uint8_t dotY = y + 3;
+            uint16_t fg = selected ? SSD1306_BLACK : SSD1306_WHITE;
+            if (dev->schedEnabled) {
+                // Scheduled tile indicator
+                s_oled.drawRect(dotX - 2, dotY - 2, 5, 5, fg);
+                if (dev->schedRunning) {
+                    s_oled.fillRect(dotX - 1, dotY - 1, 3, 3, fg);
                 }
+            } else if (dev->state) {
+                // ON → filled circle (solid dot)
+                s_oled.fillCircle(dotX, dotY, 2, fg);
+            } else {
+                // OFF → hollow circle
+                s_oled.drawCircle(dotX, dotY, 2, fg);
             }
         }
     } else {
@@ -917,9 +906,11 @@ void AgriDisplay::_drawConfirm() {
     // Device name (centred)
     const char* devLabel  = grid_confirm_device_label();
     const char* actionStr = grid_confirm_action();
+    bool schedDisable = (strcmp(actionStr, "SCH OFF") == 0);
 
     char line1[24];
-    snprintf(line1, sizeof(line1), "Toggle %s?", devLabel);
+    if (schedDisable) snprintf(line1, sizeof(line1), "Disable sched %s?", devLabel);
+    else snprintf(line1, sizeof(line1), "Toggle %s?", devLabel);
     uint8_t l1Len = strlen(line1);
     uint8_t l1x   = (AGRI_OLED_WIDTH - l1Len * 6) / 2;
     s_oled.setCursor(l1x, 18);
@@ -927,7 +918,8 @@ void AgriDisplay::_drawConfirm() {
 
     // Action line
     char line2[16];
-    snprintf(line2, sizeof(line2), "Turn %s", actionStr);
+    if (schedDisable) snprintf(line2, sizeof(line2), "Schedule OFF");
+    else snprintf(line2, sizeof(line2), "Turn %s", actionStr);
     uint8_t l2Len = strlen(line2);
     uint8_t l2x   = (AGRI_OLED_WIDTH - l2Len * 6) / 2;
     s_oled.setCursor(l2x, 32);
@@ -938,6 +930,53 @@ void AgriDisplay::_drawConfirm() {
     s_oled.print("[SEL] OK");
     s_oled.setCursor(68, 50);
     s_oled.print("[Hold] No");
+}
+
+// ============================================================================
+// Schedule Setup Screen (Relay)
+// ============================================================================
+void AgriDisplay::_drawScheduleSetup() {
+    s_oled.fillRect(0, 0, AGRI_OLED_WIDTH, 10, SSD1306_WHITE);
+    s_oled.setTextColor(SSD1306_BLACK);
+    s_oled.setCursor(2, 1);
+    s_oled.print("SCHEDULE");
+    s_oled.setTextColor(SSD1306_WHITE);
+
+    uint8_t selField = grid_schedule_field();
+    uint8_t selIdx = grid_schedule_device_index();
+    uint32_t delaySec = grid_schedule_delay_sec();
+    uint32_t runSec = grid_schedule_run_sec();
+    GridDevice* cur = grid_device(selIdx);
+
+    auto drawLine = [&](uint8_t y, bool selected, const char* text) {
+        if (selected) {
+            s_oled.fillRect(0, y, AGRI_OLED_WIDTH, 10, SSD1306_WHITE);
+            s_oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+            s_oled.setCursor(2, y + 1);
+            s_oled.print(text);
+            s_oled.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        } else {
+            s_oled.setCursor(2, y + 1);
+            s_oled.print(text);
+        }
+    };
+
+    char line0[26];
+    snprintf(line0, sizeof(line0), "Device: %s", cur ? cur->label : "SLOT1");
+    drawLine(12, selField == 0, line0);
+
+    char line1[26];
+    snprintf(line1, sizeof(line1), "Delay : %lus", (unsigned long)delaySec);
+    drawLine(22, selField == 1, line1);
+
+    char line2[26];
+    snprintf(line2, sizeof(line2), "Run   : %lus", (unsigned long)runSec);
+    drawLine(32, selField == 2, line2);
+
+    drawLine(42, selField == 3, "Apply");
+
+    s_oled.setCursor(2, 56);
+    s_oled.print("UP/DN edit SEL next");
 }
 
 // ============================================================================

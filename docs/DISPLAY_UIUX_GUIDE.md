@@ -2,6 +2,10 @@
 
 > Hardware: SSD1306 128×64 monochrome OLED | Font: 6×8 default | Refresh: 250 ms dirty-flag
 
+## Related Documentation
+
+- Relay Web Dashboard (HTTP + WebSocket): [WEB_DASHBOARD.md](WEB_DASHBOARD.md)
+
 ---
 
 ## 1. Hardware & Constraints
@@ -53,45 +57,32 @@ The display adapts based on node role:
             │                 │
      role="RELAY"      role="REMOTE"
             │                 │
-     ┌──────┴──────┐   ┌─────┴──────┐
-     │ _drawHeader │   │ Grid UI    │
-     │ _drawRelay  │   │ State Mach.│
-     │  Screen()   │   │ (7 screens)│
-     └─────────────┘   └────────────┘
+     ┌──────┴─────────────────────────┐
+     │ Shared Grid UI State Machine   │
+     │ (role-specific settings items) │
+     └────────────────────────────────┘
 ```
 
 ---
 
-## 4. Relay Node Display
+## 4. Relay Node Display (Minimal Grid Profile)
 
-Single fixed screen — no interactive navigation.
+Relay uses the same 2×3 grid framework but with a relay-focused profile:
 
-### Layout (128×64)
+- Local control enabled on device tiles with confirmation gate
+- No farm picker flow on relay
+- Settings menu is limited to relay-relevant items
 
-```
-┌────────────────────────────┐  y=0
-│▓▓ ESP-AGRI  RELAY  ▓▓▓▓▓▓▓│  Title bar (inverted, 10px)
-├────────────────────────────┤  y=10
-│ Mesh:OK  Nodes:3    ▐▌▌▌▲ │  y=12  Mesh status + RSSI bars + trend
-│                            │
-│ Farm:FARM_101 ID:1234      │  y=22  Identity
-│                            │
-│ PUMP_01:ON  VALVE_0:--     │  y=33  Device state table
-│ LIGHT_:ON   MOTOR_0:--     │  y=43  (2-col, up to 4 devices)
-│                            │
-│ Cmd: CMD_SET #42           │  y=55  Last received command
-└────────────────────────────┘  y=63
-```
+### Relay Settings Items
 
-### Elements
-
-| Zone          | Y Range | Content                                     |
-|---------------|---------|---------------------------------------------|
-| Title bar     | 0–9     | Inverted `ESP-AGRI RELAY`                   |
-| Mesh status   | 12      | `Mesh:OK/--  Nodes:N` + RSSI bars + trend   |
-| Identity      | 22      | `Farm:ID  ID:shortNodeId`                   |
-| Device table  | 33–43   | 2-column, device name + ON/`--`             |
-| Last command   | 55     | `Cmd: CMD_SET #msgId`                       |
+| Index | Label         | Action                          |
+|-------|---------------|---------------------------------|
+| 0     | AOD: ON/OFF   | Toggles always-on display       |
+| 1     | AOD Time      | → `GRID_AOD_TIME`               |
+| 2     | Mesh Status   | → `GRID_MESH_INFO`              |
+| 3     | Debug Logs    | → `GRID_DEBUG_LOGS`             |
+| 4     | Node Info     | → `GRID_NODE_INFO`              |
+| 5     | Back          | → `GRID_MAIN`                   |
 
 ---
 
@@ -111,7 +102,7 @@ The Remote node uses an enum-driven state machine with 8 screens:
        ┌──────────────┐  ┌──────────────────┐
        │ GRID_CONFIRM │  │  GRID_SETTINGS   │
        │ "Toggle X?"  │  │  Scrollable list  │
-       │ SEL=OK       │  │  5 menu items     │
+      │ SEL=OK       │  │  7 menu items     │
        │ Hold=cancel  │  └──┬──┬──┬──┬──────┘
        └──────────────┘     │  │  │  │
                             │  │  │  └─── "Back" → GRID_MAIN
@@ -145,6 +136,20 @@ The Remote node uses an enum-driven state machine with 8 screens:
 | 6     | `GRID_CONFIRM`    | Device toggle confirmation     |
 | 7     | `GRID_AOD_TIME`   | AOD timeout adjustment         |
 
+> `GRID_FARM_SEL` is used by Remote profile only.
+
+### Remote Device Tile Source of Truth
+
+Remote device tiles are relay-driven:
+
+- Tiles start with neutral slot placeholders (`SLOT_1..SLOT_5`).
+- Remote requests current bindings from relay using `DEVLIST_REQ`.
+- Relay replies with per-slot `DEVLIST_RSP` records.
+- Remote applies those responses using slot index (`nonce`) and updates tile label/device ID/state.
+
+Until at least one device-list response arrives, toggle attempts show `SYNC...`
+and are ignored to prevent accidental commands to placeholder IDs.
+
 ---
 
 ## 6. Screen Layouts (Pixel-Perfect)
@@ -157,11 +162,11 @@ The Remote node uses an enum-driven state machine with 8 screens:
 ├─────────────┬──────────────┤  y=10
 │             │              │
 │    PUMP     │    VALVE     │  Tile 0 (y:10-27)  Tile 1
-│   ON 2m ●   │  OFF 5m ○    │
+│    ON ●     │   OFF ○      │
 ├─────────────┼──────────────┤  y=28
 │             │              │
 │    LIGHT    │    MOTOR     │  Tile 2 (y:28-45)  Tile 3
-│    ...      │  OFF 15s ○   │
+│    ...      │   OFF ○      │
 ├─────────────┼──────────────┤  y=46
 │             │              │
 │    AUX      │    SETUP     │  Tile 4 (y:46-63)  Tile 5
@@ -236,39 +241,12 @@ every 2 seconds (AGRI_RSSI_POLL_MS), comparing oldest to newest.
 
 | State           | Line 1 (y+2) | Line 2 (y+10)    | Dot (top-right)     |
 |-----------------|---------------|-------------------|----------------------|
-| OFF (confirmed) | Device label  | `OFF Xm`          | Hollow circle `○`    |
-| ON (confirmed)  | Device label  | `ON Xm`           | Filled circle `●`    |
-| OFF (never seen)| Device label  | `OFF`             | Hollow circle `○`    |
-| ON (never seen) | Device label  | `ON`              | Filled circle `●`    |
-| STALE (>30 s)   | Device label  | `ON Xm!` / `OFF Xs!` | Blinking dot (2 Hz) |
+| OFF             | Device label  | `OFF`             | Hollow circle `○`    |
+| ON              | Device label  | `ON`              | Filled circle `●`    |
 | ACK pending     | Device label  | `...`             | No dot               |
 | FAIL flash      | Device label  | `FAIL`            | No dot               |
 
-#### Last-Seen Timestamp Format
-
-When a device state has been confirmed via ACK, the tile shows how long
-ago the state was last verified, giving confidence the display is fresh:
-
-| Elapsed          | Format    | Example          |
-|------------------|-----------|------------------|
-| < 60 seconds     | `Xs`      | `ON 30s`         |
-| < 60 minutes     | `Xm`      | `OFF 5m`         |
-| < 24 hours       | `Xh`      | `ON 2h`          |
-| ≥ 24 hours       | `Xd`      | `OFF 1d`         |
-
-Timestamps refresh every 5 seconds on `GRID_MAIN` via periodic dirty-mark.
-Devices that have never received an ACK show only `ON`/`OFF` (no timestamp).
-
-#### Staleness Indicator (`AGRI_STALE_MS = 30 s`)
-
-When a device's `lastSeenMs` exceeds 30 seconds, the tile signals staleness:
-
-- **`!` suffix** appended to the timestamp text: e.g. `ON 45s!`, `OFF 2m!`
-- **Blinking dot** — the status dot toggles visibility at 2 Hz (500 ms on/off)
-
-This warns the operator that the displayed state may not reflect reality
-(e.g. relay is unreachable). Staleness clears automatically when a fresh
-ACK, STATUS_RSP, or heartbeat bitmask is received.
+> ACK timestamp text is intentionally not shown on tiles.
 
 #### Selection Highlight
 
@@ -319,11 +297,11 @@ At row boundary, cursor wraps to the adjacent column:
 ├────────────────────────────┤  y=10
 │                            │  y=12
 │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│  Item 0 (selected, inverted)
-│ ▓> Change Farm            ▓│
+│ ▓> AOD: ON                ▓│
 │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
-│  AOD: ON                   │  Item 1
-│  AOD Time                  │  Item 2
-│  Mesh Status               │  Item 3
+│  AOD Time                  │  Item 1
+│  Mesh Status               │  Item 2
+│  Debug Logs                │  Item 3
 │                            │ ▲▼ scroll arrows (right edge)
 │ [Hold] back                │  y=56, footer
 └────────────────────────────┘  y=63
@@ -331,15 +309,10 @@ At row boundary, cursor wraps to the adjacent column:
 
 #### Menu Items
 
-| Index | Label         | Action                          |
-|-------|---------------|---------------------------------|
-| 0     | Change Farm   | → `GRID_FARM_SEL`              |
-| 1     | AOD: ON/OFF   | Toggles always-on display       |
-| 2     | AOD Time      | → `GRID_AOD_TIME`              |
-| 3     | Mesh Status   | → `GRID_MESH_INFO`             |
-| 4     | Debug Logs    | → `GRID_DEBUG_LOGS`            |
-| 5     | Node Info     | → `GRID_NODE_INFO`             |
-| 6     | Back          | → `GRID_MAIN`                  |
+| Profile | Menu Items |
+|---------|------------|
+| Relay   | `AOD`, `AOD Time`, `Mesh Status`, `Debug Logs`, `Node Info`, `Back` |
+| Remote  | `Change Farm`, `AOD`, `AOD Time`, `Mesh Status`, `Debug Logs`, `Node Info`, `Back` |
 
 #### Scroll Behavior
 
@@ -379,7 +352,7 @@ The RSSI line now shows:
 │▓▓ NODE INFO ▓▓▓▓▓▓▓▓▓▓▓▓▓▓│  Title bar (inverted)
 ├────────────────────────────┤  y=10
 │                            │
-│ Role: REMOTE               │  y=13
+│ Role: RELAY/REMOTE         │  y=13
 │ Farm: FARM_101             │  y=23
 │ ID: 3456789012             │  y=33
 │ Uptime: 3600s              │  y=43
@@ -432,7 +405,7 @@ The RSSI line now shows:
 | Ring buffer    | 20 entries (`AGRI_LOG_ENTRIES`)    |
 | Scroll         | UP/DOWN buttons shift window       |
 
-### 6.8 GRID_FARM_SEL — Farm Picker
+### 6.8 GRID_FARM_SEL — Farm Picker (Remote Only)
 
 ```
 ┌────────────────────────────┐  y=0
@@ -458,6 +431,8 @@ The RSSI line now shows:
 | Selection      | `> FarmName` on inverted row       |
 | Range icon     | Per-farm `●OK`/`○..`/`✕NO` at x=104 |
 | Persistence    | Saved to NVS, survives reboot      |
+
+> Relay profile does not enter `GRID_FARM_SEL`.
 
 #### Per-Farm Range Indicator
 
@@ -564,6 +539,9 @@ When a command is sent to the relay, the device tile shows `...` until:
 - ACK received → updates state to ON/OFF
 - Timeout (3 s) → shows FAIL flash
 
+If bindings are not yet synced from relay, status area shows `SYNC...` and
+the command is not sent.
+
 ### 9.2 FAIL Flash (1.5 s)
 
 On ACK timeout, the tile shows `FAIL` for 1500 ms, then auto-clears.
@@ -581,15 +559,16 @@ SEL on device tile → GRID_CONFIRM → SEL confirms → command sent → GRID_M
                                    → Hold cancels → GRID_MAIN (no action)
 ```
 
-### 9.4 Range Indicator
+### 9.4 Range + Signal Indicator
 
-Continuously shown in status bar. Updated via periodic pings (every 8 s).
+Continuously shown in the status bar as a unified range/RSSI widget. Updated
+from periodic pings (every 8 s) and RSSI sampling.
 
-| State     | Visual  | Meaning                        |
-|-----------|---------|--------------------------------|
-| OK        | `●OK`  | Relay responded within 24 s    |
-| CHECKING  | `○..`  | Initial state / waiting        |
-| LOST      | `✕NO`  | No response for 24 s (3× ping)|
+| Range State | Visual                     | Meaning                        |
+|-------------|----------------------------|--------------------------------|
+| OK          | RSSI bars + trend (if any) | Relay reachable, quality shown |
+| CHECKING    | Blinking hollow bars       | Waiting for relay response     |
+| LOST        | Bold `X` in signal area    | No response for timeout window |
 
 ### 9.5 Always-On Display (AOD)
 
@@ -646,37 +625,22 @@ Timeline (AOD OFF, 30s timeout):
 | `AGRI_AOD_MAX_SEC`        | 120 s   | Maximum AOD timeout             |
 | `AGRI_AOD_STEP_SEC`       | 5 s     | AOD timeout adjustment step     |
 | Fail flash duration        | 1500 ms | FAIL text display on tile       |
-| Tile timestamp refresh     | 5000 ms | Last-seen timestamp update rate |
-| `AGRI_STALE_MS`            | 30000 ms| Staleness warning threshold     |
 
 ---
 
 ## 11. Navigation Flow Chart
 
 ```
-Boot
- │
- └──→ GRID_FARM_SEL ──pick──→ GRID_MAIN ──(AOD timeout)──→ Display Sleep
-      (always shown on boot,     │                          (any btn wakes,
-       NVS farm pre-loaded       │                           1st press consumed)
-       if available)       ┌──────┴──────┐
-                      SEL on D0-D4   SEL on D5
-                           │              │
-                      GRID_CONFIRM    GRID_SETTINGS (7 items)
-                       │      │          │
-                  SEL=OK   Hold=No   ┌───┼────┬────┬────┬────┬────┐
-                    │        │       0    1    2    3    4    5    6
-                    │   GRID_MAIN   │    │    │    │    │    │    │
-                    │           Change  AOD  AOD  MESH DEBUG NODE BACK
-                 Send CMD        Farm  Togl Time INFO LOGS INFO  │
-                    │              │    │    │    │    │    │  GRID_MAIN
-                 GRID_MAIN        SEL  inline  │  └────┴────┘
-                               picker toggle  │  [Hold] → GRID_MAIN
-                                       │  GRID_AOD_TIME
-                                       │  UP/DN adj
-                                       │  [Hold] → GRID_SETTINGS
-                                       │
-                                   [Hold] → GRID_MAIN (from settings)
+Relay boot:
+  GRID_MAIN → (SEL D0-D4) GRID_CONFIRM → GRID_MAIN
+           └→ (SEL D5) GRID_SETTINGS (6 items) → subpages/back
+
+Remote boot:
+  GRID_FARM_SEL → GRID_MAIN → (SEL D0-D4) GRID_CONFIRM → GRID_MAIN
+                         └→ (SEL D5) GRID_SETTINGS (7 items incl. Change Farm)
+
+AOD (both profiles):
+  GRID_MAIN idle timeout (AOD OFF) → Display Sleep → Any button wakes (first press consumed)
 ```
 
 ---
@@ -686,7 +650,7 @@ Boot
 | File | Purpose |
 |------|---------|
 | `lib/AgriCore/agri_display.h`   | Display class declaration, all screen methods |
-| `lib/AgriCore/agri_display.cpp` | Pixel-level rendering (718 lines)             |
+| `lib/AgriCore/agri_display.cpp` | Pixel-level rendering (current implementation) |
 | `lib/AgriCore/agri_gridui.h`    | Grid state machine API + structs              |
 | `lib/AgriCore/agri_gridui.cpp`  | Navigation logic, cursor management           |
 | `lib/AgriCore/agri_config.h`    | Pin defs, timing constants, dimensions        |

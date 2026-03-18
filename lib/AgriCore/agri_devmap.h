@@ -39,4 +39,7 @@ const AgriDevice* agri_devmap_table();
 /// Number of configured device slots
 uint8_t agri_devmap_count();
 
+/// Reconfigure a device slot by index (id, gpio, polarity). Resets slot state to OFF.
+bool agri_devmap_reconfigure(uint8_t idx, const char* id, uint8_t gpio, bool activeHigh);
+
 #endif // AGRI_DEVMAP_H

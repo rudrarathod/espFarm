@@ -2,153 +2,87 @@
 
 ## System Overview
 
-Radio-agnostic smart irrigation control with two ESP32 nodes communicating
-over a self-forming mesh.
+ESP-Agri uses a role-based ESP32 design:
+- `esp_remote`: field controller with 3-button OLED UI
+- `esp_relay`: actuator node with configurable logical device map + dashboard
+- `esp_extender`: mesh extension node (routing/coverage only)
+- `esp_sensor`: farm telemetry node that publishes sensor data for a target farm relay
 
-```
-  ┌──────────────────────┐              ┌──────────────────────┐
-  │    Node B: REMOTE    │   ESP-MESH   │    Node A: RELAY     │
-  │  ┌────────────────┐  │  (Wi-Fi /    │  ┌────────────────┐  │
-  │  │  Push Button   │  │   multi-hop) │  │  Relay Module  │  │
-  │  │  GPIO18        │──┼──────────────┼──│  GPIO5 → Pump  │  │
-  │  └────────────────┘  │              │  └────────────────┘  │
-  │  ┌────────────────┐  │  TOGGLE ──►  │  ┌────────────────┐  │
-  │  │  OLED 128×64   │  │  ◄── ACK     │  │  OLED 128×64   │  │
-  │  │  I2C 0x3C      │  │              │  │  I2C 0x3C      │  │
-  │  └────────────────┘  │              │  └────────────────┘  │
-  └──────────────────────┘              └──────────────────────┘
-```
+Communication is transport-abstracted (`agri_transport`) and currently runs on ESP-MESH (`agri_mesh_wifi`).
 
-## Three-Layer Architecture
+## Layering
 
-```
-  ╔═══════════════════════════════════════════════════════════╗
-  ║               APPLICATION LAYER                           ║
-  ║  esp_relay.cpp  │  esp_remote.cpp                        ║
-  ║  Pump logic, button handling, Farm ID, OLED UI           ║
-  ╠═══════════════════════════════════════════════════════════╣
-  ║              TRANSPORT LAYER (agri_transport.h)           ║
-  ║  agri_send()  agri_broadcast()  agri_on_receive()        ║
-  ║  agri_update()  agri_is_connected()  agri_get_node_id()  ║
-  ╠═══════════════════════════════════════════════════════════╣
-  ║              RADIO LAYER (swappable)                      ║
-  ║  ┌─────────────────────┐  ┌─────────────────────────┐    ║
-  ║  │  AgriMeshWifi       │  │  AgriMeshtastic         │    ║
-  ║  │  (painlessMesh)     │  │  (future LoRa)          │    ║
-  ║  │  ✅ Phase 1 POC     │  │  📋 Phase 2             │    ║
-  ║  └─────────────────────┘  └─────────────────────────┘    ║
-  ╚═══════════════════════════════════════════════════════════╝
-```
+1. Application layer: `src/esp_remote.cpp`, `src/esp_relay.cpp`
+2. Protocol layer: `lib/AgriCore/agri_protocol.*`
+3. Transport abstraction: `lib/AgriCore/agri_transport.*`
+4. Radio implementation: `lib/AgriCore/agri_mesh_wifi.*`
 
-**Key rule:** Application code (`esp_relay.cpp`, `esp_remote.cpp`) NEVER
-calls painlessMesh or any radio-specific API directly.  All messaging goes
-through the `agri_*()` free-function transport API.
+Application code does not call mesh-library APIs directly.
 
-## Message Flow
+## Core Runtime Flow
 
-```
-  REMOTE                          RELAY
-    │                               │
-    │  [Button Press]               │
-    │──── TOGGLE (broadcast) ──────►│
-    │                               │── validate Farm ID
-    │                               │── check duplicates
-    │                               │── toggle relay
-    │◄──── ACK + pump state ────────│
-    │                               │
-    │  [Update OLED]                │  [Update OLED]
-```
+1. Remote syncs logical device bindings from relay (`DEVLIST` snapshot).
+2. User selects tile and confirms action on remote.
+3. Remote sends command (`DEV_ON`/`DEV_OFF`/`TOGGLE`) with farm + message ID.
+4. Relay validates farm ID, duplicate window, and device mapping.
+5. Relay applies GPIO action, then replies with `ACK` + resulting state.
+6. Remote clears pending state and refreshes UI.
+7. Sensor nodes periodically publish farm-tagged telemetry (`CMD_HEARTBEAT`) for relay-side ingestion/logging.
 
-### Retry Flow
-```
-  REMOTE                          RELAY
-    │── TOGGLE ────────────────────►│  (lost)
-    │   ... 3s timeout ...          │
-    │── TOGGLE (retry 1/3) ────────►│
-    │◄──── ACK ─────────────────────│
-```
+## Dynamic Device List Synchronization
+
+Device tiles on remote are relay-driven (not hardcoded):
+
+- Remote requests bindings via `CMD_DEVLIST_REQ`.
+- Relay responds with one `CMD_DEVLIST_RSP` per slot, using `nonce` as slot index.
+- Empty slots are reported as `SLOT_n` placeholders.
+- Remote updates each grid tile binding from those responses.
+
+Immediate update triggers:
+- after dashboard `config` changes on relay,
+- on first relay mesh-connect after boot,
+- plus remote periodic refresh.
 
 ## Message Protocol
 
-Compact JSON (<100 bytes), Meshtastic-ready:
+Compact JSON fields:
+- `f`: farm ID
+- `d`: device ID
+- `c`: command
+- `m`: message ID
+- `t`: timestamp
+- `n`: nonce (also used as slot index in `DEVLIST_RSP`)
+- `s`: device state payload
+- `src`: source node ID
 
-```json
-{"f":"FARM01","d":"REMOTE01","c":2,"m":1234,"t":567890,"n":42,"s":0,"src":0}
-```
+## Command Types
 
-| Key   | Field        | Type   | Description                        |
-|-------|-------------|--------|------------------------------------|
-| `f`   | Farm ID     | string | Farm identity for multi-farm       |
-| `d`   | Device ID   | string | Sender device identifier           |
-| `c`   | Command     | uint8  | 0=ON, 1=OFF, 2=TOGGLE, 10=ACK ... |
-| `m`   | Message ID  | uint16 | Monotonic counter (per device)     |
-| `t`   | Timestamp   | uint32 | millis() at creation               |
-| `n`   | Nonce       | uint8  | Random byte for uniqueness         |
-| `s`   | Pump State  | uint8  | 0=OFF, 1=ON (in ACK/STATUS)       |
-| `src` | Source Node | uint32 | Mesh node ID of sender             |
+| Value | Name         | Direction      | Purpose |
+|------:|--------------|----------------|---------|
+| 0     | `PUMP_ON`    | Remote → Relay | Legacy compatibility |
+| 1     | `PUMP_OFF`   | Remote → Relay | Legacy compatibility |
+| 2     | `TOGGLE`     | Remote → Relay | Toggle logical device |
+| 3     | `DEV_ON`     | Remote → Relay | Set logical device ON |
+| 4     | `DEV_OFF`    | Remote → Relay | Set logical device OFF |
+| 10    | `ACK`        | Relay → Remote | Command acknowledgment + state |
+| 11    | `NACK`       | Relay → Remote | Negative acknowledgment |
+| 12    | `STATUS_REQ` | Remote → Relay | Status polling |
+| 13    | `STATUS_RSP` | Relay → Remote | Status response |
+| 14    | `DEVLIST_REQ`| Remote → Relay | Request current relay slot bindings |
+| 15    | `DEVLIST_RSP`| Relay → Remote | Per-slot binding/state response |
+| 20    | `HEARTBEAT`  | Any → Any      | Keepalive / bitmask state |
 
-### Command Types
+## Reliability Notes
 
-| Value | Name       | Direction        | Description                  |
-|-------|-----------|------------------|------------------------------|
-| 0     | PUMP_ON   | Remote → Relay   | Turn pump on                 |
-| 1     | PUMP_OFF  | Remote → Relay   | Turn pump off                |
-| 2     | TOGGLE    | Remote → Relay   | Toggle pump state            |
-| 10    | ACK       | Relay → Remote   | Acknowledge + pump state     |
-| 11    | NACK      | Relay → Remote   | Negative acknowledge         |
-| 12    | STATUS_REQ| Remote → Relay   | Request current status       |
-| 13    | STATUS_RSP| Relay → Remote   | Status response              |
-| 20    | HEARTBEAT | Any → Any        | Keepalive (no ACK required)  |
+- Remote ACK retry window (`AGRI_ACK_TIMEOUT_MS`, `AGRI_MAX_RETRIES`)
+- Duplicate suppression ring buffer
+- Directed send when peer known, fallback broadcast
+- Relay fail-safe mapping + runtime reconfiguration via dashboard
 
-## Project Structure
+## Related Docs
 
-```
-espFarm/
-├── platformio.ini              # Multi-env config (esp_relay + esp_remote)
-├── lib/
-│   └── AgriCore/               # Shared library
-│       ├── agri_config.h       # All constants & pin defs
-│       ├── agri_protocol.h     # Message struct, serialize, dup detection
-│       ├── agri_protocol.cpp
-│       ├── agri_transport.h    # Abstract transport + free-function API
-│       ├── agri_transport.cpp
-│       ├── agri_mesh_wifi.h    # painlessMesh radio layer
-│       ├── agri_mesh_wifi.cpp
-│       ├── agri_display.h      # OLED display abstraction
-│       └── agri_display.cpp
-├── src/
-│   ├── esp_relay.cpp           # Node A — Pump/Relay firmware
-│   └── esp_remote.cpp          # Node B — Button/Remote firmware
-└── docs/
-    ├── ARCHITECTURE.md         # This file
-    └── MIGRATION_CHECKLIST.md  # Meshtastic migration guide
-```
-
-## Reliability Features
-
-| Feature                | Implementation                              |
-|------------------------|---------------------------------------------|
-| Button debounce        | Software debounce (50 ms)                   |
-| ACK with retry         | 3 retries, 3 s timeout each                 |
-| Duplicate detection    | Ring buffer of (deviceId, messageId) pairs   |
-| Relay fail-safe        | Pump OFF on boot and on unrecoverable error |
-| Mesh self-healing      | painlessMesh handles reconnection           |
-| Watchdog friendly      | Non-blocking loop, no delay() in main loop  |
-| Directed + broadcast   | Caches peer node ID for directed sends      |
-
-## Serial Debug Output
-
-Both nodes emit tagged debug logs at 115200 baud:
-
-```
-[MESH-WIFI] Initializing ESP-MESH...
-[MESH-WIFI] Node ID : 2987340156
-[MESH-WIFI] Ready — waiting for peers...
-[MESH-WIFI] + Peer joined : 4089556218
-[APP] Mesh connected — 1 peer(s)
-[APP] *BUTTON PRESSED* — sending TOGGLE
-[MESH-WIFI] >> Broadcast  cmd=TOGGLE  mid=1  [OK]
-[APP] Sent TOGGLE #1 — waiting ACK...
-[MESH-WIFI] << Recv from 2987340156: {"f":"FARM01",...}
-[APP] ACK received for #1 — pump=ON
-```
+- UI/UX: [DISPLAY_UIUX_GUIDE.md](DISPLAY_UIUX_GUIDE.md)
+- Dashboard: [WEB_DASHBOARD.md](WEB_DASHBOARD.md)
+- Flash tool: [FLASH_GUI.md](FLASH_GUI.md)
+- Migration: [MIGRATION_CHECKLIST.md](MIGRATION_CHECKLIST.md)
+- Code reality check: [CODE_ANALYSIS.md](CODE_ANALYSIS.md)

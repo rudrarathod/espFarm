@@ -12,26 +12,57 @@
 // Default Device Configuration (5 tiles)
 // ============================================================================
 static GridDevice s_devices[GRID_DEV_TILES] = {
-    { "PUMP",  "PUMP_01",  false, false, false, 0, 0 },
-    { "VALVE", "VALVE_01", false, false, false, 0, 0 },
-    { "LIGHT", "LIGHT_01", false, false, false, 0, 0 },
-    { "MOTOR", "MOTOR_01", false, false, false, 0, 0 },
-    { "AUX",   "AUX_01",   false, false, false, 0, 0 }
+    { "SLOT1", "SLOT_1", false, false, false, 0, false, false, 0, 0, 0 },
+    { "SLOT2", "SLOT_2", false, false, false, 0, false, false, 0, 0, 0 },
+    { "SLOT3", "SLOT_3", false, false, false, 0, false, false, 0, 0, 0 },
+    { "SLOT4", "SLOT_4", false, false, false, 0, false, false, 0, 0, 0 },
+    { "SLOT5", "SLOT_5", false, false, false, 0, false, false, 0, 0, 0 }
 };
 
 // ============================================================================
 // Settings Submenu Items
 // ============================================================================
+#if AGRI_NODE_ROLE == AGRI_ROLE_RELAY
 static const char* s_settingsLabels[] = {
-    "Change Farm",
     nullptr,            // AOD label — set to s_aodLabel below
     "AOD Time",
+    "Schedule",
     "Mesh Status",
     "Debug Logs",
     "Node Info",
     "Back"
 };
 static const uint8_t s_settingsCount = 7;
+
+static const uint8_t SET_IDX_AOD_TOGGLE = 0;
+static const uint8_t SET_IDX_AOD_TIME   = 1;
+static const uint8_t SET_IDX_SCHEDULE   = 2;
+static const uint8_t SET_IDX_MESH_INFO  = 3;
+static const uint8_t SET_IDX_DEBUG_LOGS = 4;
+static const uint8_t SET_IDX_NODE_INFO  = 5;
+static const uint8_t SET_IDX_BACK       = 6;
+#else
+static const char* s_settingsLabels[] = {
+    "Change Farm",
+    nullptr,            // AOD label — set to s_aodLabel below
+    "AOD Time",
+    "Schedule",
+    "Mesh Status",
+    "Debug Logs",
+    "Node Info",
+    "Back"
+};
+static const uint8_t s_settingsCount = 8;
+
+static const uint8_t SET_IDX_CHANGE_FARM = 0;
+static const uint8_t SET_IDX_AOD_TOGGLE  = 1;
+static const uint8_t SET_IDX_AOD_TIME    = 2;
+static const uint8_t SET_IDX_SCHEDULE    = 3;
+static const uint8_t SET_IDX_MESH_INFO   = 4;
+static const uint8_t SET_IDX_DEBUG_LOGS  = 5;
+static const uint8_t SET_IDX_NODE_INFO   = 6;
+static const uint8_t SET_IDX_BACK        = 7;
+#endif
 
 // Dynamic AOD label buffer ("AOD: ON" / "AOD: OFF")
 static char s_aodLabel[12] = "AOD: ON";
@@ -53,6 +84,19 @@ static char             s_farmId[AGRI_FARM_ID_LEN] = "";
 static bool             s_wantsFarmSelect = false;
 static uint8_t          s_confirmIdx   = 0;       // device index pending confirm
 static uint8_t          s_confirmCmd   = 0;       // command pending confirm
+static bool             s_confirmSchedDisable = false;
+
+// Schedule setup state (relay OLED)
+static uint8_t          s_schedDevIdx = 0;
+static uint8_t          s_schedField  = 0;  // 0=device 1=delay 2=run 3=apply
+static uint32_t         s_schedDelaySec = 30;
+static uint32_t         s_schedRunSec   = 60;
+static bool             s_schedApplyReq = false;
+static char             s_schedReqDevId[AGRI_DEVICE_ID_LEN] = "";
+static uint32_t         s_schedReqDelay = 0;
+static uint32_t         s_schedReqRun   = 0;
+static bool             s_schedDisableReq = false;
+static char             s_schedDisableDevId[AGRI_DEVICE_ID_LEN] = "";
 
 // Farm picker state
 static const char* const* s_farmList   = nullptr;
@@ -71,8 +115,11 @@ void grid_init(grid_toggle_cb_t onToggle, const char* farmId) {
     s_settingsCur = 0;
     s_logScroll   = 0;
     s_lastTouch   = millis();
+    s_confirmSchedDisable = false;
+    s_schedField = 0;
+    s_schedDevIdx = 0;
     // Point settings label to dynamic AOD buffer
-    s_settingsLabels[1] = s_aodLabel;
+    s_settingsLabels[SET_IDX_AOD_TOGGLE] = s_aodLabel;
     if (farmId && farmId[0]) {
         strlcpy(s_farmId, farmId, sizeof(s_farmId));
     } else {
@@ -128,6 +175,20 @@ void grid_on_up() {
             if (s_aodTimeoutSec + AGRI_AOD_STEP_SEC <= AGRI_AOD_MAX_SEC)
                 s_aodTimeoutSec += AGRI_AOD_STEP_SEC;
             break;
+
+        case GRID_SCHED_SETUP:
+            if (s_schedField == 0) {
+                s_schedDevIdx = (s_schedDevIdx == 0) ? (GRID_DEV_TILES - 1) : (s_schedDevIdx - 1);
+                s_schedDelaySec = s_devices[s_schedDevIdx].schedDelaySec ? s_devices[s_schedDevIdx].schedDelaySec : 30;
+                s_schedRunSec = s_devices[s_schedDevIdx].schedRunSec ? s_devices[s_schedDevIdx].schedRunSec : 60;
+            } else if (s_schedField == 1) {
+                if (s_schedDelaySec < 86400UL) s_schedDelaySec += 5;
+            } else if (s_schedField == 2) {
+                if (s_schedRunSec < 86400UL) s_schedRunSec += 5;
+            } else {
+                s_schedField = 0;
+            }
+            break;
     }
 }
 
@@ -181,6 +242,22 @@ void grid_on_down() {
             else
                 s_aodTimeoutSec = AGRI_AOD_MIN_SEC;
             break;
+
+        case GRID_SCHED_SETUP:
+            if (s_schedField == 0) {
+                s_schedDevIdx = (s_schedDevIdx + 1) % GRID_DEV_TILES;
+                s_schedDelaySec = s_devices[s_schedDevIdx].schedDelaySec ? s_devices[s_schedDevIdx].schedDelaySec : 30;
+                s_schedRunSec = s_devices[s_schedDevIdx].schedRunSec ? s_devices[s_schedDevIdx].schedRunSec : 60;
+            } else if (s_schedField == 1) {
+                if (s_schedDelaySec >= 5) s_schedDelaySec -= 5;
+                else s_schedDelaySec = 0;
+            } else if (s_schedField == 2) {
+                if (s_schedRunSec > 5) s_schedRunSec -= 5;
+                else s_schedRunSec = 1;
+            } else {
+                s_schedField = 3;
+            }
+            break;
     }
 }
 
@@ -198,7 +275,8 @@ void grid_on_ok() {
                 GridDevice& dev = s_devices[s_gridCursor];
                 if (!dev.ackPending) {
                     s_confirmIdx = s_gridCursor;
-                    s_confirmCmd = dev.state ? CMD_DEV_OFF : CMD_DEV_ON;
+                    s_confirmSchedDisable = dev.schedEnabled;
+                    s_confirmCmd = s_confirmSchedDisable ? CMD_TOGGLE : (dev.state ? CMD_DEV_OFF : CMD_DEV_ON);
                     s_screen = GRID_CONFIRM;
                 }
             } else {
@@ -211,10 +289,15 @@ void grid_on_ok() {
         // ---- Confirm Screen ----
         case GRID_CONFIRM:
             // OK on confirm → fire the toggle command
-            if (s_toggleCb) {
+            {
                 GridDevice& dev = s_devices[s_confirmIdx];
-                dev.ackPending = true;
-                s_toggleCb(s_farmId, dev.deviceId, s_confirmCmd);
+                if (s_confirmSchedDisable) {
+                    strlcpy(s_schedDisableDevId, dev.deviceId, sizeof(s_schedDisableDevId));
+                    s_schedDisableReq = true;
+                } else if (s_toggleCb) {
+                    dev.ackPending = true;
+                    s_toggleCb(s_farmId, dev.deviceId, s_confirmCmd);
+                }
             }
             s_screen = GRID_MAIN;
             break;
@@ -222,19 +305,53 @@ void grid_on_ok() {
         // ---- Settings Submenu ----
         case GRID_SETTINGS:
             switch (s_settingsCur) {
-                case 0: s_screen = GRID_FARM_SEL;
-                        s_wantsFarmSelect = true;     break;  // Change Farm
-                case 1:                                        // AOD toggle
-                        s_aodEnabled = !s_aodEnabled;
-                        strlcpy(s_aodLabel, s_aodEnabled ? "AOD: ON" : "AOD: OFF",
-                                sizeof(s_aodLabel));
-                        break;
-                case 2: s_screen = GRID_AOD_TIME;     break;  // AOD Time
-                case 3: s_screen = GRID_MESH_INFO;    break;
-                case 4: s_screen = GRID_DEBUG_LOGS;
-                        s_logScroll = 0;               break;
-                case 5: s_screen = GRID_NODE_INFO;     break;
-                case 6: s_screen = GRID_MAIN;          break;  // Back
+    #if AGRI_NODE_ROLE == AGRI_ROLE_RELAY
+            case SET_IDX_AOD_TOGGLE:
+                s_aodEnabled = !s_aodEnabled;
+                strlcpy(s_aodLabel, s_aodEnabled ? "AOD: ON" : "AOD: OFF",
+                    sizeof(s_aodLabel));
+                break;
+            case SET_IDX_AOD_TIME:  s_screen = GRID_AOD_TIME;   break;
+            case SET_IDX_SCHEDULE:
+                s_schedField = 0;
+                s_schedDevIdx = 0;
+                s_schedDelaySec = s_devices[s_schedDevIdx].schedDelaySec ? s_devices[s_schedDevIdx].schedDelaySec : 30;
+                s_schedRunSec = s_devices[s_schedDevIdx].schedRunSec ? s_devices[s_schedDevIdx].schedRunSec : 60;
+                s_screen = GRID_SCHED_SETUP;
+                break;
+            case SET_IDX_MESH_INFO: s_screen = GRID_MESH_INFO;  break;
+            case SET_IDX_DEBUG_LOGS:
+                s_screen = GRID_DEBUG_LOGS;
+                s_logScroll = 0;
+                break;
+            case SET_IDX_NODE_INFO: s_screen = GRID_NODE_INFO;  break;
+            case SET_IDX_BACK:      s_screen = GRID_MAIN;       break;
+    #else
+            case SET_IDX_CHANGE_FARM:
+                s_screen = GRID_FARM_SEL;
+                s_wantsFarmSelect = true;
+                break;
+            case SET_IDX_AOD_TOGGLE:
+                s_aodEnabled = !s_aodEnabled;
+                strlcpy(s_aodLabel, s_aodEnabled ? "AOD: ON" : "AOD: OFF",
+                    sizeof(s_aodLabel));
+                break;
+            case SET_IDX_AOD_TIME:  s_screen = GRID_AOD_TIME;   break;
+            case SET_IDX_SCHEDULE:
+                s_schedField = 0;
+                s_schedDevIdx = 0;
+                s_schedDelaySec = s_devices[s_schedDevIdx].schedDelaySec ? s_devices[s_schedDevIdx].schedDelaySec : 30;
+                s_schedRunSec = s_devices[s_schedDevIdx].schedRunSec ? s_devices[s_schedDevIdx].schedRunSec : 60;
+                s_screen = GRID_SCHED_SETUP;
+                break;
+            case SET_IDX_MESH_INFO: s_screen = GRID_MESH_INFO;  break;
+            case SET_IDX_DEBUG_LOGS:
+                s_screen = GRID_DEBUG_LOGS;
+                s_logScroll = 0;
+                break;
+            case SET_IDX_NODE_INFO: s_screen = GRID_NODE_INFO;  break;
+            case SET_IDX_BACK:      s_screen = GRID_MAIN;       break;
+    #endif
             }
             break;
 
@@ -243,6 +360,24 @@ void grid_on_ok() {
         case GRID_DEBUG_LOGS:
         case GRID_NODE_INFO:
         case GRID_AOD_TIME:
+            break;
+
+        case GRID_SCHED_SETUP:
+            if (s_schedField < 3) {
+                s_schedField++;
+                if (s_schedField == 1) {
+                    s_schedDelaySec = s_devices[s_schedDevIdx].schedDelaySec ? s_devices[s_schedDevIdx].schedDelaySec : 30;
+                } else if (s_schedField == 2) {
+                    s_schedRunSec = s_devices[s_schedDevIdx].schedRunSec ? s_devices[s_schedDevIdx].schedRunSec : 60;
+                }
+            } else {
+                GridDevice& dev = s_devices[s_schedDevIdx];
+                strlcpy(s_schedReqDevId, dev.deviceId, sizeof(s_schedReqDevId));
+                s_schedReqDelay = s_schedDelaySec;
+                s_schedReqRun = s_schedRunSec;
+                s_schedApplyReq = true;
+                s_screen = GRID_MAIN;
+            }
             break;
 
         // ---- Farm Selection ----
@@ -282,6 +417,10 @@ void grid_on_back() {
             s_screen = GRID_SETTINGS;
             break;
 
+        case GRID_SCHED_SETUP:
+            s_screen = GRID_SETTINGS;
+            break;
+
         case GRID_CONFIRM:
             // Cancel confirmation → return to grid
             s_screen = GRID_MAIN;
@@ -315,12 +454,35 @@ bool grid_wants_farm_select() {
 // ============================================================================
 // Device State Updates  (called from ACK / NACK handlers)
 // ============================================================================
+bool grid_set_device_binding(uint8_t idx, const char* deviceId, bool state) {
+    if (idx >= GRID_DEV_TILES || !deviceId || !deviceId[0]) return false;
+
+    GridDevice& dev = s_devices[idx];
+    strlcpy(dev.deviceId, deviceId, sizeof(dev.deviceId));
+
+    uint8_t labelPos = 0;
+    for (uint8_t i = 0; deviceId[i] && labelPos < sizeof(dev.label) - 1; i++) {
+        if (deviceId[i] == '_') break;
+        dev.label[labelPos++] = deviceId[i];
+    }
+    dev.label[labelPos] = '\0';
+
+    dev.state      = state;
+    dev.ackPending = false;
+    dev.failFlash  = false;
+    dev.schedEnabled = false;
+    dev.schedRunning = false;
+    dev.schedLeftSec = 0;
+    dev.schedDelaySec = 0;
+    dev.schedRunSec = 0;
+    return true;
+}
+
 void grid_set_device_state(const char* deviceId, bool state) {
     for (uint8_t i = 0; i < GRID_DEV_TILES; i++) {
         if (strcmp(s_devices[i].deviceId, deviceId) == 0) {
             s_devices[i].state      = state;
             s_devices[i].ackPending = false;
-            s_devices[i].lastSeenMs = millis();
             return;
         }
     }
@@ -346,6 +508,48 @@ void grid_set_fail_flash(const char* deviceId) {
     }
 }
 
+void grid_set_device_schedule(const char* deviceId,
+                              bool enabled,
+                              bool running,
+                              uint32_t leftSec,
+                              uint32_t delaySec,
+                              uint32_t runSec) {
+    for (uint8_t i = 0; i < GRID_DEV_TILES; i++) {
+        if (strcmp(s_devices[i].deviceId, deviceId) == 0) {
+            s_devices[i].schedEnabled = enabled;
+            s_devices[i].schedRunning = running;
+            s_devices[i].schedLeftSec = leftSec;
+            s_devices[i].schedDelaySec = delaySec;
+            s_devices[i].schedRunSec = runSec;
+            return;
+        }
+    }
+}
+
+bool grid_take_schedule_apply_request(char* outDeviceId,
+                                      uint8_t outLen,
+                                      uint32_t* outDelaySec,
+                                      uint32_t* outRunSec) {
+    if (!s_schedApplyReq) return false;
+    s_schedApplyReq = false;
+    if (outDeviceId && outLen) strlcpy(outDeviceId, s_schedReqDevId, outLen);
+    if (outDelaySec) *outDelaySec = s_schedReqDelay;
+    if (outRunSec) *outRunSec = s_schedReqRun;
+    return true;
+}
+
+bool grid_take_schedule_disable_request(char* outDeviceId, uint8_t outLen) {
+    if (!s_schedDisableReq) return false;
+    s_schedDisableReq = false;
+    if (outDeviceId && outLen) strlcpy(outDeviceId, s_schedDisableDevId, outLen);
+    return true;
+}
+
+uint8_t grid_schedule_field() { return s_schedField; }
+uint8_t grid_schedule_device_index() { return s_schedDevIdx; }
+uint32_t grid_schedule_delay_sec() { return s_schedDelaySec; }
+uint32_t grid_schedule_run_sec() { return s_schedRunSec; }
+
 // ============================================================================
 // Settings Submenu Accessors
 // ============================================================================
@@ -366,6 +570,7 @@ const char* grid_confirm_device_label() {
 }
 
 const char* grid_confirm_action() {
+    if (s_confirmSchedDisable) return "SCH OFF";
     return (s_confirmCmd == CMD_DEV_ON) ? "ON" : "OFF";
 }
 
@@ -375,10 +580,6 @@ const char* grid_confirm_action() {
 void grid_touch() {
     s_lastTouch = millis();
 }
-
-// Periodic timestamp refresh interval (5 seconds — faster for stale detection)
-static const uint32_t TIMESTAMP_REFRESH_MS = 5000;
-static uint32_t s_lastTimestampRefresh = 0;
 
 bool grid_check_timeout() {
     uint32_t now = millis();
@@ -400,20 +601,6 @@ bool grid_check_timeout() {
         s_screen     = GRID_MAIN;
         s_gridCursor = 0;
         changed = true;
-    }
-
-    // Periodic refresh on GRID_MAIN so last-seen timestamps update
-    if (s_screen == GRID_MAIN &&
-        (now - s_lastTimestampRefresh) >= TIMESTAMP_REFRESH_MS)
-    {
-        s_lastTimestampRefresh = now;
-        // Only mark changed if at least one device has a valid timestamp
-        for (uint8_t i = 0; i < GRID_DEV_TILES; i++) {
-            if (s_devices[i].lastSeenMs != 0) {
-                changed = true;
-                break;
-            }
-        }
     }
 
     return changed;

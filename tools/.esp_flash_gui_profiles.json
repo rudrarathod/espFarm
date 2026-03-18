@@ -1,0 +1,22 @@
+{
+  "Relay / Pump": {
+    "id": "FARM_102",
+    "env": "esp_relay",
+    "remote_farm_list": ""
+  },
+  "Remote / Button": {
+    "id": "REMOTE_101",
+    "env": "",
+    "remote_farm_list": ""
+  },
+  "Extender / Mesh": {
+    "id": "EXTENDER_101",
+    "env": "",
+    "remote_farm_list": ""
+  },
+  "Sensor / Farm": {
+    "id": "SENSOR_101",
+    "env": "esp_sensor",
+    "remote_farm_list": "FARM_102"
+  }
+}

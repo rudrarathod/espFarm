@@ -1,0 +1,9 @@
+{
+  "theme": "Light",
+  "font_size": 11,
+  "auto_refresh": true,
+  "db_path": "/home/rudrarathod/Documents/github/espFarm/tools/esp_devices.db",
+  "default_baud": 115200,
+  "auto_connect": false,
+  "project_root": "/home/rudrarathod/Documents/github/espFarm"
+}

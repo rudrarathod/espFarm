@@ -28,7 +28,11 @@ enum AgriCommand : uint8_t {
     CMD_NACK        = 11,
     CMD_STATUS_REQ  = 12,
     CMD_STATUS_RSP  = 13,
-    CMD_HEARTBEAT   = 20
+    CMD_DEVLIST_REQ = 14,
+    CMD_DEVLIST_RSP = 15,
+    CMD_HEARTBEAT   = 20,
+    CMD_SCHED_SET   = 21,
+    CMD_SCHED_CLR   = 22
 };
 
 // ============================================================================
@@ -37,6 +41,7 @@ enum AgriCommand : uint8_t {
 struct AgriMessage {
     char     farmId[AGRI_FARM_ID_LEN];      // Target farm
     char     deviceId[AGRI_DEVICE_ID_LEN];  // Target device (e.g. PUMP_01)
+    char     senderId[AGRI_DEVICE_ID_LEN];  // Sender logical ID (e.g. REMOTE_001)
     uint8_t  command;                        // AgriCommand enum
     uint16_t messageId;                      // Monotonic per-device counter
     uint32_t timestamp;                      // millis() at creation
@@ -71,5 +76,7 @@ void    agri_record_message(const char* deviceId, uint16_t messageId);
 // ============================================================================
 const char* agri_command_name(uint8_t cmd);
 bool        agri_validate_farm_id(const char* farmId);
+const char* agri_get_runtime_farm_id();
+void        agri_set_runtime_farm_id(const char* farmId);
 
 #endif // AGRI_PROTOCOL_H

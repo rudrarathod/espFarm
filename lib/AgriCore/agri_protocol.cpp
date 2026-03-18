@@ -17,6 +17,7 @@ struct DupEntry {
 
 static DupEntry  s_dupBuffer[AGRI_DUP_BUFFER_SIZE];
 static uint8_t   s_dupIndex = 0;
+static char      s_runtimeFarmId[AGRI_FARM_ID_LEN] = AGRI_FARM_ID;
 
 // ============================================================================
 // AgriMessage
@@ -28,6 +29,7 @@ AgriMessage::AgriMessage() {
 void AgriMessage::clear() {
     memset(farmId, 0, sizeof(farmId));
     memset(deviceId, 0, sizeof(deviceId));
+    memset(senderId, 0, sizeof(senderId));
     command      = 0;
     messageId    = 0;
     timestamp    = 0;
@@ -43,6 +45,7 @@ String agri_serialize(const AgriMessage& msg) {
     JsonDocument doc;
     doc["f"]   = msg.farmId;
     doc["d"]   = msg.deviceId;
+    doc["sid"] = msg.senderId;
     doc["c"]   = msg.command;
     doc["m"]   = msg.messageId;
     doc["t"]   = msg.timestamp;
@@ -66,6 +69,7 @@ bool agri_deserialize(const String& json, AgriMessage& msg) {
     msg.clear();
     strlcpy(msg.farmId,   doc["f"]   | "", sizeof(msg.farmId));
     strlcpy(msg.deviceId, doc["d"]   | "", sizeof(msg.deviceId));
+    strlcpy(msg.senderId, doc["sid"] | "", sizeof(msg.senderId));
     msg.command      = doc["c"]   | (uint8_t)0;
     msg.messageId    = doc["m"]   | (uint16_t)0;
     msg.timestamp    = doc["t"]   | (uint32_t)0;
@@ -124,11 +128,24 @@ const char* agri_command_name(uint8_t cmd) {
         case CMD_NACK:        return "NACK";
         case CMD_STATUS_REQ:  return "STATUS_REQ";
         case CMD_STATUS_RSP:  return "STATUS_RSP";
+        case CMD_DEVLIST_REQ: return "DEVLIST_REQ";
+        case CMD_DEVLIST_RSP: return "DEVLIST_RSP";
         case CMD_HEARTBEAT:   return "HEARTBEAT";
+        case CMD_SCHED_SET:   return "SCHED_SET";
+        case CMD_SCHED_CLR:   return "SCHED_CLR";
         default:              return "UNKNOWN";
     }
 }
 
 bool agri_validate_farm_id(const char* farmId) {
-    return (strcmp(farmId, AGRI_FARM_ID) == 0);
+    return (strcmp(farmId, s_runtimeFarmId) == 0);
+}
+
+const char* agri_get_runtime_farm_id() {
+    return s_runtimeFarmId;
+}
+
+void agri_set_runtime_farm_id(const char* farmId) {
+    if (!farmId || !farmId[0]) return;
+    strlcpy(s_runtimeFarmId, farmId, sizeof(s_runtimeFarmId));
 }

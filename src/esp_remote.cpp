@@ -21,6 +21,8 @@
  * abstraction layer (agri_send / agri_broadcast / agri_on_receive).
  ******************************************************************************/
 #include <Arduino.h>
+#include <ctype.h>
+#include <string.h>
 #include "agri_config.h"
 #include "agri_protocol.h"
 #include "agri_transport.h"
@@ -37,7 +39,9 @@
 // ============================================================================
 static AgriMeshWifi g_mesh;
 static AgriDisplay  g_display;
-static const char*  DEVICE_ID = "REMOTE01";
+static char         g_remoteId[AGRI_DEVICE_ID_LEN] = AGRI_REMOTE_ID;
+static const char*  DEVICE_ID = g_remoteId;
+static char         g_remoteFarmListCsv[256] = AGRI_REMOTE_FARM_LIST_CSV;
 
 // ============================================================================
 // 3-Button State  (UP / SEL / DOWN)
@@ -82,6 +86,8 @@ static uint32_t g_relayNodeId      = 0;
 // Timing
 static uint32_t g_lastDisplayRefresh = 0;
 static uint32_t g_statusClearTime    = 0;
+static uint32_t g_lastDevlistReq     = 0;
+static bool     g_deviceListReady    = false;
 
 // AOD (Always-On Display) — sleep/wake
 static bool     g_displaySleeping    = false;
@@ -94,19 +100,146 @@ static GridScreen g_prevScreenForAod = GRID_MAIN;  // track screen transitions f
 static uint32_t g_lastRssiPoll       = 0;
 static RssiTracker g_rssiTracker;
 
+struct RemoteScheduleUi {
+    bool enabled;
+    bool running;
+    uint32_t leftSec;
+    uint32_t delaySec;
+    uint32_t runSec;
+};
+
+static RemoteScheduleUi g_schedUi[GRID_DEV_TILES] = {};
+static uint32_t g_lastSchedUiTick = 0;
+
 // ============================================================================
 // Farm Selection  (boot-time picker)
 // ============================================================================
-static const char* s_farmList[] = {
-    "FARM_101", "FARM_102", "FARM_103", "FARM_TST"
-};
-static const uint8_t s_farmCount = sizeof(s_farmList) / sizeof(s_farmList[0]);
+static char s_farmStorage[AGRI_TEST_FARM_COUNT][AGRI_FARM_ID_LEN];
+static const char* s_farmList[AGRI_TEST_FARM_COUNT];
+static uint8_t s_farmCount = 0;
 static char g_selectedFarm[AGRI_FARM_ID_LEN] = "";
+
+static void init_remote_farm_list() {
+    s_farmCount = 0;
+    char csvBuf[256] = {0};
+    strlcpy(csvBuf, g_remoteFarmListCsv, sizeof(csvBuf));
+
+    char* saveptr = nullptr;
+    char* token = strtok_r(csvBuf, ",", &saveptr);
+    while (token && s_farmCount < AGRI_TEST_FARM_COUNT) {
+        while (*token == ' ' || *token == '\t') token++;
+        char* end = token + strlen(token);
+        while (end > token && (end[-1] == ' ' || end[-1] == '\t')) {
+            *--end = '\0';
+        }
+
+        if (token[0]) {
+            strlcpy(s_farmStorage[s_farmCount], token, sizeof(s_farmStorage[0]));
+            s_farmList[s_farmCount] = s_farmStorage[s_farmCount];
+            s_farmCount++;
+        }
+        token = strtok_r(nullptr, ",", &saveptr);
+    }
+
+    if (s_farmCount == 0) {
+        strlcpy(s_farmStorage[0], AGRI_FARM_ID, sizeof(s_farmStorage[0]));
+        s_farmList[0] = s_farmStorage[0];
+        s_farmCount = 1;
+    }
+}
 
 /// Non-blocking farm picker — enters the grid-based farm selection screen
 static void enter_farm_picker() {
     grid_enter_farm_select(s_farmList, s_farmCount);
     g_display.markDirty();
+}
+
+static bool is_selected_farm(const char* farmId) {
+    if (!g_selectedFarm[0]) return false;
+    return strcmp(farmId, g_selectedFarm) == 0;
+}
+
+static void serial_print_cfg() {
+    const char* farm = g_selectedFarm[0] ? g_selectedFarm : AGRI_FARM_ID;
+    const char* list = g_remoteFarmListCsv;
+
+    String json = "{\"role\":\"remote\",\"farmId\":\"";
+    json += farm;
+    json += "\",\"id\":\"";
+    json += DEVICE_ID;
+    json += "\",\"remoteId\":\"";
+    json += DEVICE_ID;
+    json += "\",\"remoteFarmList\":\"";
+    json += list;
+    json += "\",\"list\":\"";
+    json += list;
+    json += "\",\"syncVer\":2";
+    json += ",\"protoVer\":2";
+    json += "}";
+    Serial.println(json);
+}
+
+static bool serial_apply_cfg(const String& jsonText) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, jsonText);
+    if (err) return false;
+
+    const char* remoteId = doc["remoteId"] | doc["id"] | "";
+    const char* farmId = doc["farmId"] | "";
+    const char* remoteFarmList = nullptr;
+    if (!doc["remoteFarmList"].isNull()) {
+        remoteFarmList = doc["remoteFarmList"] | "";
+    } else if (!doc["list"].isNull()) {
+        remoteFarmList = doc["list"] | "";
+    }
+
+    if (remoteId[0]) {
+        strlcpy(g_remoteId, remoteId, sizeof(g_remoteId));
+        agri_nvs_save_remote_id(g_remoteId);
+    }
+
+    if (remoteFarmList != nullptr) {
+        strlcpy(g_remoteFarmListCsv, remoteFarmList, sizeof(g_remoteFarmListCsv));
+        agri_nvs_save_remote_farm_list(g_remoteFarmListCsv);
+        init_remote_farm_list();
+    }
+
+    if (farmId[0]) {
+        strlcpy(g_selectedFarm, farmId, sizeof(g_selectedFarm));
+        grid_set_farm_id(g_selectedFarm);
+        agri_nvs_save_farm(g_selectedFarm);
+    }
+
+    String ack = "{\"setCfg\":\"ok\",\"role\":\"remote\",\"syncVer\":2,\"protoVer\":2}";
+    Serial.println(ack);
+    serial_print_cfg();
+    return true;
+}
+
+static void handle_serial_cli() {
+    if (!Serial.available()) return;
+
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (!cmd.length()) return;
+
+    if (cmd == "AGRI_GET_CFG" || cmd == "AGRI_GET_CFG?") {
+        serial_print_cfg();
+        return;
+    }
+
+    if (cmd.startsWith("AGRI_SET_CFG ")) {
+        String body = cmd.substring(strlen("AGRI_SET_CFG "));
+        if (!serial_apply_cfg(body)) {
+            Serial.println("{\"setCfg\":\"error\",\"reason\":\"bad_json\",\"role\":\"remote\",\"syncVer\":2}");
+        }
+        return;
+    }
+
+    if (cmd == "AGRI_HELP") {
+        Serial.println("AGRI_GET_CFG");
+        Serial.println("AGRI_SET_CFG {json}");
+    }
 }
 
 // ============================================================================
@@ -116,6 +249,7 @@ static void send_command(const char* farmId, const char* deviceId, uint8_t cmd) 
     g_pendingMsg.clear();
     strlcpy(g_pendingMsg.farmId,   farmId,   sizeof(g_pendingMsg.farmId));
     strlcpy(g_pendingMsg.deviceId, deviceId, sizeof(g_pendingMsg.deviceId));
+    strlcpy(g_pendingMsg.senderId, DEVICE_ID, sizeof(g_pendingMsg.senderId));
     g_pendingMsg.command      = cmd;
     g_pendingMsg.messageId    = agri_next_message_id();
     g_pendingMsg.timestamp    = millis();
@@ -155,10 +289,110 @@ static void send_command(const char* farmId, const char* deviceId, uint8_t cmd) 
     g_display.markDirty();
 }
 
+static int grid_index_for_device(const char* deviceId) {
+    if (!deviceId || !deviceId[0]) return -1;
+    for (uint8_t i = 0; i < GRID_DEV_TILES; i++) {
+        GridDevice* dev = grid_device(i);
+        if (!dev) continue;
+        if (strcmp(dev->deviceId, deviceId) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static void send_schedule_command(const char* farmId, const char* deviceId, bool enable, uint8_t delaySec, uint8_t runSec) {
+    g_pendingMsg.clear();
+    strlcpy(g_pendingMsg.farmId,   farmId,   sizeof(g_pendingMsg.farmId));
+    strlcpy(g_pendingMsg.deviceId, deviceId, sizeof(g_pendingMsg.deviceId));
+    strlcpy(g_pendingMsg.senderId, DEVICE_ID, sizeof(g_pendingMsg.senderId));
+    g_pendingMsg.command      = enable ? CMD_SCHED_SET : CMD_SCHED_CLR;
+    g_pendingMsg.messageId    = agri_next_message_id();
+    g_pendingMsg.timestamp    = millis();
+    g_pendingMsg.nonce        = delaySec;
+    g_pendingMsg.devState     = runSec;
+    g_pendingMsg.sourceNodeId = agri_get_node_id();
+
+    g_pendingMsgId = g_pendingMsg.messageId;
+    g_retryCount   = 0;
+
+    bool ok;
+    if (g_relayNodeId != 0) {
+        ok = agri_send(g_relayNodeId, g_pendingMsg);
+        if (!ok) ok = agri_broadcast(g_pendingMsg);
+    } else {
+        ok = agri_broadcast(g_pendingMsg);
+    }
+
+    if (ok) {
+        g_txState  = TX_WAITING_ACK;
+        g_ackTimer = millis();
+    } else {
+        g_txState = TX_FAILED;
+    }
+
+    int idx = grid_index_for_device(deviceId);
+    if (idx >= 0 && idx < GRID_DEV_TILES) {
+        if (enable) {
+            g_schedUi[idx].enabled = true;
+            g_schedUi[idx].running = false;
+            g_schedUi[idx].leftSec = delaySec;
+            g_schedUi[idx].delaySec = delaySec;
+            g_schedUi[idx].runSec = runSec;
+        } else {
+            g_schedUi[idx].enabled = false;
+            g_schedUi[idx].running = false;
+            g_schedUi[idx].leftSec = 0;
+        }
+        grid_set_device_schedule(deviceId,
+                                 g_schedUi[idx].enabled,
+                                 g_schedUi[idx].running,
+                                 g_schedUi[idx].leftSec,
+                                 g_schedUi[idx].delaySec,
+                                 g_schedUi[idx].runSec);
+    }
+
+    g_display.setLastCommand(agri_command_name(g_pendingMsg.command), g_pendingMsgId);
+    g_display.setAckStatus(enable ? "SCH SET" : "SCH OFF");
+    g_display.markDirty();
+}
+
+static void request_device_list() {
+    if (!g_selectedFarm[0]) {
+        g_lastDevlistReq = millis();
+        return;
+    }
+
+    AgriMessage req;
+    req.clear();
+    strlcpy(req.farmId,   g_selectedFarm, sizeof(req.farmId));
+    strlcpy(req.deviceId, "*",           sizeof(req.deviceId));
+    strlcpy(req.senderId, DEVICE_ID,      sizeof(req.senderId));
+    req.command      = CMD_DEVLIST_REQ;
+    req.messageId    = agri_next_message_id();
+    req.timestamp    = millis();
+    req.nonce        = agri_random_nonce();
+    req.sourceNodeId = agri_get_node_id();
+
+    if (g_relayNodeId != 0) {
+        agri_send(g_relayNodeId, req);
+    } else {
+        agri_broadcast(req);
+    }
+
+    g_lastDevlistReq = millis();
+}
+
 // ============================================================================
 // Grid Toggle Callback  (fired by grid UI on device tile SELECT)
 // ============================================================================
 static void on_grid_toggle(const char* farmId, const char* deviceId, uint8_t cmd) {
+    if (!g_deviceListReady) {
+        Serial.println("[APP] Device list not synced yet");
+        grid_clear_ack_pending(deviceId);
+        g_display.setAckStatus("SYNC...");
+        g_display.markDirty();
+        return;
+    }
+
     if (g_txState == TX_IDLE || g_txState == TX_FAILED) {
         send_command(farmId, deviceId, cmd);
     } else {
@@ -172,7 +406,9 @@ static void on_grid_toggle(const char* farmId, const char* deviceId, uint8_t cmd
 // ============================================================================
 static void retry_send() {
     g_retryCount++;
-    g_pendingMsg.nonce     = agri_random_nonce();
+    if (g_pendingMsg.command != CMD_SCHED_SET) {
+        g_pendingMsg.nonce = agri_random_nonce();
+    }
     g_pendingMsg.timestamp = millis();
 
     Serial.printf("[APP] Retry %d/%d for #%u\n",
@@ -213,13 +449,14 @@ static void on_message_received(uint32_t from, const AgriMessage& msg) {
     }
 
     // --- Farm ID validation ---
-    if (!agri_validate_farm_id(msg.farmId)) {
-        Serial.printf("[APP] REJECTED: Farm ID mismatch '%s'\n", msg.farmId);
+    if (!is_selected_farm(msg.farmId)) {
+        Serial.printf("[APP] REJECTED: Farm mismatch '%s' (selected '%s')\n",
+                      msg.farmId, g_selectedFarm);
         return;
     }
 
     switch (msg.command) {
-        case CMD_ACK:
+        case CMD_ACK: {
             if (g_txState == TX_WAITING_ACK && msg.messageId == g_pendingMsgId) {
                 Serial.printf("[APP] ACK #%u — dev=%s  state=%s\n",
                               msg.messageId, msg.deviceId,
@@ -241,6 +478,25 @@ static void on_message_received(uint32_t from, const AgriMessage& msg) {
                 g_display.markDirty();
                 g_statusClearTime = millis() + AGRI_STATUS_CLEAR_MS;
 
+                if (g_pendingMsg.command == CMD_SCHED_SET || g_pendingMsg.command == CMD_SCHED_CLR) {
+                    int idx = grid_index_for_device(g_pendingMsg.deviceId);
+                    if (idx >= 0 && idx < GRID_DEV_TILES) {
+                        bool en = (g_pendingMsg.command == CMD_SCHED_SET);
+                        if (!en) {
+                            g_schedUi[idx].enabled = false;
+                            g_schedUi[idx].running = false;
+                            g_schedUi[idx].leftSec = 0;
+                        }
+                        grid_set_device_schedule(g_pendingMsg.deviceId,
+                                                 g_schedUi[idx].enabled,
+                                                 g_schedUi[idx].running,
+                                                 g_schedUi[idx].leftSec,
+                                                 g_schedUi[idx].delaySec,
+                                                 g_schedUi[idx].runSec);
+                    }
+                    request_device_list();
+                }
+
                 agri_log(msg.farmId, msg.deviceId,
                          agri_command_name(g_pendingMsg.command), "OK");
             } else {
@@ -248,6 +504,7 @@ static void on_message_received(uint32_t from, const AgriMessage& msg) {
                               msg.messageId, g_pendingMsgId);
             }
             break;
+        }
 
         case CMD_NACK:
             if (g_txState == TX_WAITING_ACK && msg.messageId == g_pendingMsgId) {
@@ -276,24 +533,64 @@ static void on_message_received(uint32_t from, const AgriMessage& msg) {
             g_display.markDirty();
             break;
 
-        case CMD_HEARTBEAT:
+        case CMD_DEVLIST_RSP: {
+            g_relayNodeId = from;
+            range_on_heartbeat(from);
+
+            uint8_t idx = msg.nonce;
+            if (idx < GRID_DEV_TILES) {
+                const char* devId = msg.deviceId;
+                char slotName[AGRI_DEVICE_ID_LEN] = {0};
+                if (!devId[0]) {
+                    snprintf(slotName, sizeof(slotName), "SLOT_%u", idx + 1);
+                    devId = slotName;
+                }
+                bool devOn = (msg.devState & 0x01) != 0;
+                bool schedRun = (msg.devState & 0x40) != 0;
+                bool schedEn = (msg.devState & 0x80) != 0;
+                grid_set_device_binding(idx, devId, devOn);
+                g_schedUi[idx].enabled = schedEn;
+                g_schedUi[idx].running = schedRun;
+                if (!schedEn) {
+                    g_schedUi[idx].running = false;
+                    g_schedUi[idx].leftSec = 0;
+                }
+                grid_set_device_schedule(devId,
+                                         g_schedUi[idx].enabled,
+                                         g_schedUi[idx].running,
+                                         g_schedUi[idx].leftSec,
+                                         g_schedUi[idx].delaySec,
+                                         g_schedUi[idx].runSec);
+                g_deviceListReady = true;
+                g_display.markDirty();
+            }
+            break;
+        }
+
+        case CMD_HEARTBEAT: {
             Serial.printf("[APP] Heartbeat from %s  devState=0x%02X\n",
                           msg.deviceId, msg.devState);
             range_on_heartbeat(from);
             g_relayNodeId = from;
+
+            bool scheduleOn = (msg.devState & 0x80) != 0;
+            uint8_t stateMask = (uint8_t)(msg.devState & 0x7F);
 
             // Decode device state bitmask from relay heartbeat
             if (strcmp(msg.deviceId, "*") == 0 && msg.devState != 0xFF) {
                 for (uint8_t i = 0; i < GRID_DEV_TILES && i < 8; i++) {
                     GridDevice* dev = grid_device(i);
                     if (!dev) continue;
-                    bool on = (msg.devState >> i) & 1;
+                    bool on = (stateMask >> i) & 1;
                     grid_set_device_state(dev->deviceId, on);
                 }
             }
 
+            g_display.setAckStatus(scheduleOn ? "SCH ON" : "SCH OFF");
+
             g_display.markDirty();
             break;
+        }
 
         default:
             break;
@@ -460,9 +757,22 @@ void setup() {
     // --- NVS persistence ---
     agri_nvs_init();
 
+    {
+        char savedRemoteId[AGRI_DEVICE_ID_LEN] = {0};
+        if (agri_nvs_load_remote_id(savedRemoteId, sizeof(savedRemoteId))) {
+            strlcpy(g_remoteId, savedRemoteId, sizeof(g_remoteId));
+        }
+        char savedRemoteList[256] = {0};
+        if (agri_nvs_load_remote_farm_list(savedRemoteList, sizeof(savedRemoteList))) {
+            strlcpy(g_remoteFarmListCsv, savedRemoteList, sizeof(g_remoteFarmListCsv));
+        }
+    }
+
     // --- Grid UI system (init before farm picker so grid state exists) ---
     grid_init(on_grid_toggle, nullptr);
     Serial.println("[APP] Grid UI initialised (6-tile dashboard)");
+
+    init_remote_farm_list();
 
     // --- Load AOD settings from NVS ---
     {
@@ -513,6 +823,10 @@ void setup() {
                   agri_get_node_id(), g_selectedFarm);
     Serial.println("[APP] UP=navigate  DOWN=navigate  SEL=short:toggle/long:back");
     Serial.println("[APP] Grid: PUMP | VALVE | LIGHT | MOTOR | AUX | SETUP");
+    serial_print_cfg();
+
+    // Prime a relay-side device list sync after boot.
+    request_device_list();
 }
 
 // ============================================================================
@@ -521,6 +835,7 @@ void setup() {
 void loop() {
     // --- Drive mesh radio ---
     agri_update();
+    handle_serial_cli();
 
     uint32_t now = millis();
 
@@ -532,13 +847,59 @@ void loop() {
     if (grid_farm_selected(pickedFarm, sizeof(pickedFarm))) {
         strlcpy(g_selectedFarm, pickedFarm, sizeof(g_selectedFarm));
         grid_set_farm_id(g_selectedFarm);
+        g_deviceListReady = false;
         g_display.setFarmId(g_selectedFarm);
         g_display.markDirty();
         agri_nvs_save_farm(g_selectedFarm);
         Serial.printf("[APP] Farm selected: %s (saved to NVS)\n", g_selectedFarm);
+
+        request_device_list();
     }
     if (grid_wants_farm_select()) {
         enter_farm_picker();
+    }
+
+    // --- Schedule actions from remote OLED setup/device confirm ---
+    {
+        char reqDev[AGRI_DEVICE_ID_LEN] = {0};
+        uint32_t reqDelay = 0;
+        uint32_t reqRun = 0;
+        if (grid_take_schedule_apply_request(reqDev, sizeof(reqDev), &reqDelay, &reqRun)) {
+            uint8_t delaySec = (uint8_t)((reqDelay > 255) ? 255 : reqDelay);
+            uint8_t runSec = (uint8_t)((reqRun > 255) ? 255 : (reqRun < 1 ? 1 : reqRun));
+            send_schedule_command(g_selectedFarm, reqDev, true, delaySec, runSec);
+        }
+
+        char disableDev[AGRI_DEVICE_ID_LEN] = {0};
+        if (grid_take_schedule_disable_request(disableDev, sizeof(disableDev))) {
+            send_schedule_command(g_selectedFarm, disableDev, false, 0, 0);
+        }
+    }
+
+    // --- Local schedule badge countdown model (mirrors remote-issued timers) ---
+    if ((now - g_lastSchedUiTick) >= 1000UL) {
+        g_lastSchedUiTick = now;
+        bool changed = false;
+        for (uint8_t i = 0; i < GRID_DEV_TILES; i++) {
+            GridDevice* dev = grid_device(i);
+            if (!dev || !g_schedUi[i].enabled) continue;
+            if (g_schedUi[i].leftSec > 0) g_schedUi[i].leftSec--;
+            if (!g_schedUi[i].running && g_schedUi[i].leftSec == 0) {
+                g_schedUi[i].running = true;
+                g_schedUi[i].leftSec = g_schedUi[i].runSec;
+            } else if (g_schedUi[i].running && g_schedUi[i].leftSec == 0) {
+                g_schedUi[i].enabled = false;
+                g_schedUi[i].running = false;
+            }
+            grid_set_device_schedule(dev->deviceId,
+                                     g_schedUi[i].enabled,
+                                     g_schedUi[i].running,
+                                     g_schedUi[i].leftSec,
+                                     g_schedUi[i].delaySec,
+                                     g_schedUi[i].runSec);
+            changed = true;
+        }
+        if (changed) g_display.markDirty();
     }
 
     // --- Grid UI timeout (return to main grid after inactivity) ---
@@ -611,6 +972,7 @@ void loop() {
         ping.clear();
         strlcpy(ping.farmId,   g_selectedFarm, sizeof(ping.farmId));
         strlcpy(ping.deviceId, "*",           sizeof(ping.deviceId));
+        strlcpy(ping.senderId, DEVICE_ID,      sizeof(ping.senderId));
         ping.command      = CMD_STATUS_REQ;
         ping.messageId    = agri_next_message_id();
         ping.timestamp    = millis();
@@ -622,6 +984,11 @@ void loop() {
         } else {
             agri_broadcast(ping);
         }
+    }
+
+    // --- Periodic device list sync from relay dashboard-configured map ---
+    if ((now - g_lastDevlistReq) >= AGRI_RANGE_PING_MS) {
+        request_device_list();
     }
 
     // --- Periodic display refresh ---

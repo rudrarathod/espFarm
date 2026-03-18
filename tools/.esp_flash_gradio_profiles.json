@@ -1,0 +1,12 @@
+{
+  "Relay / Pump": {
+    "id": "FARM_101",
+    "env": "esp_relay",
+    "remote_farm_list": ""
+  },
+  "Remote / Button": {
+    "id": "REMOTE_001",
+    "env": "esp_remote",
+    "remote_farm_list": "FARM_101"
+  }
+}

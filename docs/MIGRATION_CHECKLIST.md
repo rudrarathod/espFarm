@@ -12,7 +12,7 @@ migrating from **ESP-MESH (Wi-Fi)** to **Meshtastic (LoRa)**.
 
 | Component              | File(s)                 | Notes                          |
 |------------------------|------------------------|--------------------------------|
-| Application logic      | `esp_relay.cpp`        | Pump control, Farm ID check    |
+| Application logic      | `esp_relay.cpp`        | Core pump/device logic stays; network dashboard code may need adaptation |
 | Application logic      | `esp_remote.cpp`       | Button handling, ACK/retry     |
 | Message protocol       | `agri_protocol.h/cpp`  | Already <100 bytes             |
 | Transport API          | `agri_transport.h/cpp` | Free-function API unchanged    |
@@ -20,6 +20,7 @@ migrating from **ESP-MESH (Wi-Fi)** to **Meshtastic (LoRa)**.
 | Configuration (mostly) | `agri_config.h`        | Farm ID, pins, timing          |
 | Duplicate detection    | `agri_protocol.cpp`    | deviceId + messageId based     |
 | ACK / retry logic      | `esp_remote.cpp`       | Already handles high latency   |
+| Device-list sync model | `esp_remote.cpp`, `esp_relay.cpp` | Keep `DEVLIST_REQ/RSP` behavior unchanged |
 
 ---
 
@@ -101,6 +102,9 @@ in `agri_protocol.cpp`.  The `AgriMessage` struct is already fixed-size, so
 // [19]   checksum (XOR of bytes 0-18)
 ```
 
+> Keep semantic parity if switching encoding: `CMD_DEVLIST_REQ` and
+> `CMD_DEVLIST_RSP` must still carry slot index and per-slot binding/state.
+
 ---
 
 ## Migration Considerations
@@ -145,4 +149,11 @@ in `agri_protocol.cpp`.  The `AgriMessage` struct is already fixed-size, so
 9. [ ] Test multi-hop with three or more nodes
 10. [ ] Remove `agri_mesh_wifi.h/cpp` if Wi-Fi POC no longer needed
 
-**Total application code changes: 2 lines per node (include + instance type)**
+**Typical minimum change:** remote path is close to include+instance swap; relay path usually needs additional dashboard/network adaptation.
+
+> **Reality check (current codebase):** `esp_remote.cpp` remains close to the
+> 2-line swap model, but `esp_relay.cpp` currently includes Wi-Fi-specific
+> dashboard plumbing (`WiFi`, `WebServer`, `WebSocketsServer`, mDNS, IP-based
+> status reporting). A non-Wi-Fi migration usually requires additional relay
+> changes unless the dashboard is explicitly split behind a transport-agnostic
+> interface.

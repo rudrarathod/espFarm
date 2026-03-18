@@ -84,6 +84,7 @@ private:
     void _drawGridNodeInfo();
     void _drawConfirm();
     void _drawAodTimeSetting();
+    void _drawScheduleSetup();
 };
 
 #endif // AGRI_DISPLAY_H

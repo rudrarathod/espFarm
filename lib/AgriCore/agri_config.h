@@ -11,13 +11,49 @@
 // ============================================================================
 // Farm Identity  (this relay's own farm — set per-device at compile time)
 // ============================================================================
-#define AGRI_FARM_ID            "FARM_101"
+#ifndef AGRI_FARM_ID
+#define AGRI_FARM_ID            "FARM_102"
+#endif
+
+// Remote sender identity used in protocol senderId
+#ifndef AGRI_REMOTE_ID
+#define AGRI_REMOTE_ID          "REMOTE01"
+#endif
+
+// Remote allowed farm list (boot picker CSV), e.g. "FARM_101,FARM_102"
+#ifndef AGRI_REMOTE_FARM_LIST_CSV
+#define AGRI_REMOTE_FARM_LIST_CSV "FARM_101,FARM_102"
+#endif
+
+// Relay allow-list for sender IDs (CSV) or "*" to allow all remotes
+#ifndef AGRI_RELAY_ALLOWED_REMOTES_CSV
+#define AGRI_RELAY_ALLOWED_REMOTES_CSV "*"
+#endif
+
+// Relay default logical device map (optional):
+// "idx,id,gpio,ah;idx,id,gpio,ah"  or  "id,gpio,ah;id,gpio,ah"
+// Example: "0,PUMP_01,13,1;1,VALVE_01,19,1"
+#ifndef AGRI_RELAY_DEVICE_LIST_CSV
+#define AGRI_RELAY_DEVICE_LIST_CSV ""
+#endif
 
 // ============================================================================
 // Node Roles
 // ============================================================================
 #define AGRI_ROLE_RELAY         0
 #define AGRI_ROLE_REMOTE        1
+#define AGRI_ROLE_EXTENDER      2
+#define AGRI_ROLE_SENSOR        3
+
+// ============================================================================
+// Sensor Node Defaults
+// ============================================================================
+#ifndef AGRI_SENSOR_ID
+#define AGRI_SENSOR_ID          "SENSOR_01"
+#endif
+
+#define AGRI_SENSOR_PIN         33      // ADC pin for soil/moisture sensor
+#define AGRI_SENSOR_REPORT_MS   10000   // Telemetry publish interval
 
 // ============================================================================
 // OLED Display (I2C) — Both Nodes
@@ -39,14 +75,14 @@
 // ============================================================================
 // Relay — Pump Node (default device GPIO)
 // ============================================================================
-#define AGRI_RELAY_PIN          5
+#define AGRI_RELAY_PIN          13
 #define AGRI_RELAY_ACTIVE_HIGH  true    // true = GPIO HIGH activates relay
 #define AGRI_LED_PIN            2       // D2 — status LED on relay node
 
 // ============================================================================
 // Multi-Device GPIO Map  (Relay Node — test mode)
 // ============================================================================
-#define AGRI_DEV_PUMP_PIN       5       // PUMP_01  → GPIO5
+#define AGRI_DEV_PUMP_PIN       13      // PUMP_01  → GPIO13
 #define AGRI_DEV_VALVE_PIN      19      // VALVE_01 → GPIO19
 #define AGRI_DEV_LIGHT_PIN      23      // LIGHT_01 → GPIO23
 #define AGRI_DEV_MOTOR_PIN      4       // MOTOR_01 → GPIO4
@@ -61,6 +97,9 @@
 #define AGRI_MESH_PORT          5555
 #define AGRI_MESH_CHANNEL       6
 
+// Relay Web Dashboard hostname (mDNS: http://<name>.local)
+#define AGRI_RELAY_HOSTNAME     "esp-agri-relay"
+
 // ============================================================================
 // Timing Constants (milliseconds)
 // ============================================================================
@@ -70,17 +109,13 @@
 #define AGRI_DISPLAY_REFRESH_MS 250
 #define AGRI_HEARTBEAT_MS       30000
 #define AGRI_STATUS_CLEAR_MS    8000
+#define AGRI_SCHEDULE_TICK_MS   1000
 
 // ============================================================================
 // Range Indicator Timing
 // ============================================================================
 #define AGRI_RANGE_PING_MS      8000    // Send STATUS_REQ every 8 s
 #define AGRI_RANGE_TIMEOUT_MS   24000   // 3× ping interval → declare LOST
-
-// ============================================================================
-// Staleness Detection
-// ============================================================================
-#define AGRI_STALE_MS           30000   // 30 s — mark tile timestamp as stale
 
 // ============================================================================
 // RSSI Signal Strength Indicator
