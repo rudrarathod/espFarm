@@ -17,6 +17,44 @@
 
 ---
 
+## System Architecture
+```mermaid
+flowchart TD
+    subgraph RemoteCluster[Remote Cluster]
+        R1[Remote R1\nOLED + Buttons]
+        R2[Remote R2\nOLED + Buttons]
+    end
+
+    subgraph MeshBackbone[Local MESH Network]
+        M1[Mesh Router / Extender]
+    end
+
+    subgraph RelayCluster[Relay Cluster]
+        A1[Relay A1\nGPIO Control]
+        A2[Relay A2\nGPIO Control]
+    end
+
+    subgraph Field[Field Telemetry & Actuators]
+        S1[Moisture Sensor]
+        P1[Pump]
+        V1[Valve]
+    end
+
+    Farmer((Farmer)) -->|OLED UI| R1
+    Farmer -->|Web Dashboard| A1
+    
+    R1 <--> M1
+    R2 <--> M1
+    M1 <--> A1
+    M1 <--> A2
+
+    A1 -->|Switch GPIO| P1
+    A1 -->|Switch GPIO| V1
+    S1 -->|Broadcast Level| M1
+```
+
+---
+
 ## Key Contributions & Engineering Challenges
 
 *   **Architected and Implemented a Radio-Agnostic Transport Abstraction Layer**
