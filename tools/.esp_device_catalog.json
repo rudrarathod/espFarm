@@ -14,14 +14,14 @@
     "id": "REMOTE_001",
     "remoteId": "REMOTE_001",
     "farmId": "FARM_102",
-    "port": "/dev/ttyUSB0",
+    "port": "/dev/ttyUSB1",
     "syncVer": 2,
     "remoteFarmList": "FARM_101,FARM_102",
     "remoteFarms": [
       "FARM_101",
       "FARM_102"
     ],
-    "updatedAt": "2026-03-18T01:37:31"
+    "updatedAt": "2026-03-18T10:49:47"
   },
   "relay:FARM_102": {
     "role": "relay",
@@ -29,11 +29,11 @@
     "farmId": "FARM_102",
     "port": "/dev/ttyUSB0",
     "syncVer": 2,
-    "relayDevices": "0,PUM,13,0;1,VALVE_01,19,1;2,LIGHT_01,23,1;3,MOTOR_01,4,1;4,Extra,15,1",
+    "relayDevices": "0,PUMP,13,0;1,VALVE_01,19,1;2,LIGHT_01,12,1;3,MOTOR_01,4,1;4,Extra,15,1",
     "devices": [
       {
         "idx": "0",
-        "id": "PUM",
+        "id": "PUMP",
         "gpio": "13",
         "ah": "0"
       },
@@ -46,7 +46,7 @@
       {
         "idx": "2",
         "id": "LIGHT_01",
-        "gpio": "23",
+        "gpio": "12",
         "ah": "1"
       },
       {
@@ -62,7 +62,7 @@
         "ah": "1"
       }
     ],
-    "updatedAt": "2026-03-18T02:29:27"
+    "updatedAt": "2026-03-18T12:03:32"
   },
   "sensor:SENSOR_101": {
     "role": "sensor",
@@ -71,6 +71,6 @@
     "farmId": "FARM_102",
     "port": "/dev/ttyUSB1",
     "syncVer": 2,
-    "updatedAt": "2026-03-18T02:25:41"
+    "updatedAt": "2026-03-18T12:05:14"
   }
 }

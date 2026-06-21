@@ -53,7 +53,7 @@
 #endif
 
 #define AGRI_SENSOR_PIN         33      // ADC pin for soil/moisture sensor
-#define AGRI_SENSOR_REPORT_MS   10000   // Telemetry publish interval
+#define AGRI_SENSOR_REPORT_MS   1000    // Telemetry publish interval
 
 // ============================================================================
 // OLED Display (I2C) — Both Nodes
